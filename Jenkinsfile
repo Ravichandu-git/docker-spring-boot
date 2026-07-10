@@ -1,50 +1,77 @@
 pipeline {
-    agent any
+    agent {
+        label 'linux'
+    }
 
     environment {
-        registry = "211223789150.dkr.ecr.us-east-1.amazonaws.com/my-docker-repo"
+    APP_NAME = "helm"  
+    ECR_REGISTRY = " 486517829811.dkr.ecr.ap-south-1.amazonaws.com"
+    ECR_REPO = "${ECR_REGISTRY}/${APP_NAME}"
+    IMAGE_TAG = "${BUILD_NUMBER}"
+    KUBE_NAMESPACE = "helm-deployment"
     }
+
     stages {
-        stage('Checkout') {
+        stage('Clone Git Repo') {
             steps {
-                checkout scmGit(branches: [[name: '*/master']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/akannan1087/docker-spring-boot']])
+                git 'https://github.com/Ravichandu-git/docker-spring-boot.git'
             }
         }
-        
-        stage ("Build JAR") {
+
+        stage('Build Java App') {
             steps {
-                sh "mvn clean install"
+                sh 'mvn clean package -DskipTests'
             }
         }
-        
-        stage ("Build Image") {
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${ECR_REPO}:${IMAGE_TAG} ."
+                sh "docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_REPO}:latest"
+            }
+        }
+
+        stage('Push to ECR') {
             steps {
                 script {
-                    docker.build registry
+                    // Ensure the ECR repository exists
+                    sh """
+                    aws ecr describe-repositories --repository-names ${APP_NAME} --region ap-south-1 || \
+                    aws ecr create-repository --repository-name ${APP_NAME} --region ap-south-1
+                    """
+
+                    // Login to ECR
+                    sh "aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
+
+                    // Push Docker images
+                    sh "docker push ${ECR_REPO}:${IMAGE_TAG}"
+                    sh "docker push ${ECR_REPO}:latest"
                 }
             }
         }
         
-        stage ("Push to ECR") {
+        stage('Deploy to EKS using Helm') {
             steps {
                 script {
-                    sh "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 211223789150.dkr.ecr.us-east-1.amazonaws.com"
-                    sh "docker push 211223789150.dkr.ecr.us-east-1.amazonaws.com/my-docker-repo:latest"
-                    
+                    sh """
+            aws eks --region ap-south-1 update-kubeconfig --name demo-cluster
+            helm upgrade --install first ./mychart \
+                --namespace ${KUBE_NAMESPACE} \
+                --create-namespace \
+                --set image.repository=${ECR_REPO} \
+                --set image.tag=${IMAGE_TAG}
+            """
                 }
             }
         }
-        
-        stage ("Helm package") {
-            steps {
-                    sh "helm package springboot"
-                }
-            }
-                
-        stage ("Helm install") {
-            steps {
-                    sh "helm upgrade myrelease-21 springboot-0.1.0.tgz"
-                }
-            }
+    }
+
+    post {
+        success {
+            echo "Deployment successful: ${APP_NAME}:${IMAGE_TAG}"
+        }
+        failure {
+            echo "Deployment failed"
+        }
     }
 }
